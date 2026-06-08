@@ -1,0 +1,42 @@
+# Full single-VPS stack: Redis + LiveKit server + Caddy (TLS) + Nadia agent.
+# All on host networking so they talk over localhost and WebRTC UDP works.
+#
+# Fresh VPS:            docker compose up -d --build
+# Existing LiveKit VPS: docker compose up -d --build --no-deps nadia   (agent only)
+
+services:
+  redis:
+    image: redis:7-alpine
+    network_mode: host
+    command: redis-server --bind 127.0.0.1 --port 6379
+    restart: unless-stopped
+
+  livekit:
+    image: livekit/livekit-server:latest
+    network_mode: host
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped
+    depends_on: [redis]
+
+  caddy:
+    image: caddy:2
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    depends_on: [livekit]
+
+  nadia:
+    build: .
+    network_mode: host
+    env_file: .env
+    restart: unless-stopped
+    depends_on: [livekit]
+
+volumes:
+  caddy_data:
+  caddy_config:

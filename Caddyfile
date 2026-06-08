@@ -1,0 +1,6 @@
+# Auto-TLS reverse proxy: browsers/CRM connect to wss://livekit.yourdomain.com,
+# Caddy terminates TLS and forwards to the local LiveKit signaling port.
+# Point this domain's DNS A record at your VPS public IP first.
+livekit.yourdomain.com {
+    reverse_proxy 127.0.0.1:7880
+}

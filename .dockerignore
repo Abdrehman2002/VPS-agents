@@ -1,0 +1,9 @@
+.env
+*.log
+*.mp3
+*.wav
+__pycache__/
+.venv/
+.git/
+DEPLOY.md
+README.md

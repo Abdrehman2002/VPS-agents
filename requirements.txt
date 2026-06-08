@@ -1,0 +1,8 @@
+# Nadia — HBL MFB complaint agent (LiveKit, cloud APIs only)
+livekit-agents[deepgram,openai,silero]>=1.5.0
+livekit-plugins-turn-detector>=1.5.0
+livekit-plugins-upliftai>=1.5.1
+python-socketio>=5.11.0        # REQUIRED by the Uplift plugin (else it silently won't load)
+aiohttp>=3.9.0
+python-dotenv>=1.0.0
+openai>=1.30.0

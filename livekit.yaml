@@ -1,0 +1,16 @@
+# LiveKit server config (self-hosted). The API key/secret here MUST match the
+# LIVEKIT_API_KEY / LIVEKIT_API_SECRET in the agent's .env.
+# Generate a fresh pair:  docker run --rm livekit/livekit-server generate-keys
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true          # advertise the VPS public IP for WebRTC media
+keys:
+  # REPLACE both sides with your generated key: secret
+  APIyourkeyhere: your_long_random_secret_here_replace_me
+redis:
+  address: 127.0.0.1:6379
+logging:
+  level: info
