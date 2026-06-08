@@ -70,9 +70,13 @@ UPLIFT_VOICE_ID      = os.getenv("UPLIFT_VOICE_ID", "helpdesk-agent")  # Uplift 
 UPLIFT_OUTPUT_FORMAT = os.getenv("UPLIFT_OUTPUT_FORMAT", "MP3_22050_128")
 USE_UPLIFT           = bool(UPLIFTAI_API_KEY) and HAS_UPLIFTAI
 
-DASHBOARD_URL   = os.getenv("DASHBOARD_URL", "")
-CRM_WEBHOOK_URL = os.getenv("CRM_WEBHOOK_URL", "")
-AGENT_NAME      = os.getenv("AGENT_NAME", "nadia")
+DASHBOARD_URL    = os.getenv("DASHBOARD_URL", "")
+CRM_WEBHOOK_URL  = os.getenv("CRM_WEBHOOK_URL", "")
+# Itqan CRM ingestion — Nadia creates the complaint ticket here and reads back the TKT number
+CRM_API_URL       = os.getenv("CRM_API_URL", "")         # e.g. https://crm-api.example.com/api/v1
+CRM_TENANT_ID     = os.getenv("CRM_TENANT_ID", "")       # CRM tenant UUID
+CRM_INGEST_SECRET = os.getenv("CRM_INGEST_SECRET", "")   # optional; must match LIVEKIT_INGEST_SECRET on the CRM
+AGENT_NAME       = os.getenv("AGENT_NAME", "nadia")
 HELPLINE        = os.getenv("HELPLINE", "111-42-5000")
 
 # Priority → SLA spoken commitment (Roman Urdu) + working-day count for dates
@@ -204,7 +208,8 @@ class NadiaAgent(Agent):
     def __init__(self, system_prompt: str, caller_phone: str | None = None):
         super().__init__(instructions=system_prompt)
         self.caller_phone = caller_phone
-        self.complaints: list[dict] = []   # all complaints filed this call (for analytics/CRM)
+        self.complaints: list[dict] = []       # all complaints filed this call (for analytics/CRM)
+        self._voice_call_ids: list[str] = []   # CRM voice_bot_call ids → updated with transcript at call end
 
     async def on_enter(self) -> None:
         # Fixed, correctly-pronounced opening (not LLM-generated) so it's identical every call.
@@ -235,8 +240,10 @@ class NadiaAgent(Agent):
         if cat not in VALID_CATEGORIES:
             cat = "other"
         pri = _norm_priority(priority)
-        ref = _gen_reference()
         sla = SLA_TEXT[pri]
+
+        # Create the ticket in the Itqan CRM and read back the official TKT number.
+        ref = await self._create_crm_ticket(caller_name, cat, pri, description, fraud_amount)
 
         record = {
             "reference_number": ref,
@@ -254,15 +261,44 @@ class NadiaAgent(Agent):
         self.complaints.append(record)
         logger.info(f"Complaint registered: {ref} [{cat}/{pri}] {description!r}")
 
-        # Fire-and-forget to dashboard/CRM (non-blocking on failure)
-        await _post_complaint(record)
-
         return (
             f"COMPLAINT REGISTERED. Reference number: {ref}. Priority: {pri}. "
             f"SLA to tell the caller: '{sla}'. "
-            f"Now: spell the reference number letter-by-letter to the caller, repeat it once, "
-            f"then state the SLA exactly."
+            f"Now: read the reference number to the caller clearly, character by character "
+            f"(for example 'T K T zero zero zero zero one'), repeat it once, then state the SLA exactly."
         )
+
+    async def _create_crm_ticket(self, name: str, category: str, priority: str,
+                                 description: str, fraud_amount: str) -> str:
+        """Create the complaint ticket in the Itqan CRM and return its TKT number.
+        Falls back to a local reference if the CRM is unreachable, so the call still completes."""
+        if CRM_API_URL and CRM_TENANT_ID:
+            url = f"{CRM_API_URL.rstrip('/')}/voice-bot/livekit/complaint?tenantId={CRM_TENANT_ID}"
+            headers = {"Content-Type": "application/json"}
+            if CRM_INGEST_SECRET:
+                headers["Authorization"] = f"Bearer {CRM_INGEST_SECRET}"
+            payload = {
+                "reporterName": name,
+                "reporterPhone": self.caller_phone,
+                "category": category,
+                "priority": priority,
+                "subject": description[:120],
+                "description": description,
+                "fraudAmount": fraud_amount,
+            }
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.post(url, json=payload, headers=headers,
+                                      timeout=aiohttp.ClientTimeout(total=15)) as r:
+                        data = await r.json()
+                        if data.get("ticketNumber"):
+                            if data.get("voiceCallId"):
+                                self._voice_call_ids.append(data["voiceCallId"])
+                            return data["ticketNumber"]
+                        logger.error(f"CRM returned no ticketNumber: {data}")
+            except Exception as e:
+                logger.error(f"CRM complaint create failed: {e}")
+        return _gen_reference()  # fallback if CRM unreachable
 
 
 # ── Backend posting (dashboard + CRM) ──────────────────────────────────────────
@@ -421,6 +457,26 @@ async def entrypoint(ctx: JobContext):
             except Exception:
                 pass
             analysis = await analyze_call(transcript)
+
+            # Attach the final transcript/summary to each CRM call record created this call
+            if CRM_API_URL and CRM_TENANT_ID and nadia._voice_call_ids:
+                ce_url = f"{CRM_API_URL.rstrip('/')}/voice-bot/livekit/call-ended?tenantId={CRM_TENANT_ID}"
+                ce_headers = {"Content-Type": "application/json"}
+                if CRM_INGEST_SECRET:
+                    ce_headers["Authorization"] = f"Bearer {CRM_INGEST_SECRET}"
+                async with aiohttp.ClientSession() as http:
+                    for vcid in nadia._voice_call_ids:
+                        try:
+                            await http.post(ce_url, json={
+                                "voiceCallId": vcid,
+                                "transcript": transcript,
+                                "summary": analysis.get("call_summary") if isinstance(analysis, dict) else None,
+                                "sentiment": analysis.get("caller_sentiment") if isinstance(analysis, dict) else None,
+                                "durationSeconds": int((datetime.now(timezone.utc) - call_start).total_seconds()),
+                            }, headers=ce_headers, timeout=aiohttp.ClientTimeout(total=10))
+                        except Exception as e:
+                            logger.error(f"CRM call-ended POST failed: {e}")
+
             payload = {
                 "agent": AGENT_NAME,
                 "caller_phone": caller_phone,
