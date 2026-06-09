@@ -72,10 +72,10 @@ USE_UPLIFT           = bool(UPLIFTAI_API_KEY) and HAS_UPLIFTAI
 
 DASHBOARD_URL    = os.getenv("DASHBOARD_URL", "")
 CRM_WEBHOOK_URL  = os.getenv("CRM_WEBHOOK_URL", "")
-# Itqan CRM ingestion — Nadia creates the complaint ticket here and reads back the TKT number
-CRM_API_URL       = os.getenv("CRM_API_URL", "")         # e.g. https://crm-api.example.com/api/v1
-CRM_TENANT_ID     = os.getenv("CRM_TENANT_ID", "")       # CRM tenant UUID
-CRM_INGEST_SECRET = os.getenv("CRM_INGEST_SECRET", "")   # optional; must match LIVEKIT_INGEST_SECRET on the CRM
+# Supabase (server-less backend) — Nadia creates complaints via the create_complaint RPC
+SUPABASE_URL         = os.getenv("SUPABASE_URL", "")          # https://<ref>.supabase.co
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")  # service_role key (Settings → API)
+CRM_TENANT_ID        = os.getenv("CRM_TENANT_ID", "")         # tenant UUID
 AGENT_NAME       = os.getenv("AGENT_NAME", "nadia")
 HELPLINE        = os.getenv("HELPLINE", "111-42-5000")
 
@@ -270,35 +270,38 @@ class NadiaAgent(Agent):
 
     async def _create_crm_ticket(self, name: str, category: str, priority: str,
                                  description: str, fraud_amount: str) -> str:
-        """Create the complaint ticket in the Itqan CRM and return its TKT number.
-        Falls back to a local reference if the CRM is unreachable, so the call still completes."""
-        if CRM_API_URL and CRM_TENANT_ID:
-            url = f"{CRM_API_URL.rstrip('/')}/voice-bot/livekit/complaint?tenantId={CRM_TENANT_ID}"
-            headers = {"Content-Type": "application/json"}
-            if CRM_INGEST_SECRET:
-                headers["Authorization"] = f"Bearer {CRM_INGEST_SECRET}"
+        """Create the complaint via the Supabase `create_complaint` RPC (server-less) and
+        return its TKT number. Falls back to a local reference if Supabase is unreachable."""
+        if SUPABASE_URL and SUPABASE_SERVICE_KEY and CRM_TENANT_ID:
+            url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/rpc/create_complaint"
+            headers = {
+                "Content-Type": "application/json",
+                "apikey": SUPABASE_SERVICE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            }
             payload = {
-                "reporterName": name,
-                "reporterPhone": self.caller_phone,
-                "category": category,
-                "priority": priority,
-                "subject": description[:120],
-                "description": description,
-                "fraudAmount": fraud_amount,
+                "p_tenant_id":     CRM_TENANT_ID,
+                "p_reporter_name": name,
+                "p_reporter_phone": self.caller_phone,
+                "p_category":      category,
+                "p_priority":      priority,
+                "p_subject":       description[:120],
+                "p_description":   description,
+                "p_fraud_amount":  fraud_amount,
             }
             try:
                 async with aiohttp.ClientSession() as s:
                     async with s.post(url, json=payload, headers=headers,
                                       timeout=aiohttp.ClientTimeout(total=15)) as r:
                         data = await r.json()
-                        if data.get("ticketNumber"):
+                        if isinstance(data, dict) and data.get("ticketNumber"):
                             if data.get("voiceCallId"):
                                 self._voice_call_ids.append(data["voiceCallId"])
                             return data["ticketNumber"]
-                        logger.error(f"CRM returned no ticketNumber: {data}")
+                        logger.error(f"Supabase create_complaint returned: {data}")
             except Exception as e:
-                logger.error(f"CRM complaint create failed: {e}")
-        return _gen_reference()  # fallback if CRM unreachable
+                logger.error(f"Supabase complaint create failed: {e}")
+        return _gen_reference()  # fallback if Supabase unreachable
 
 
 # ── Backend posting (dashboard + CRM) ──────────────────────────────────────────
@@ -458,24 +461,30 @@ async def entrypoint(ctx: JobContext):
                 pass
             analysis = await analyze_call(transcript)
 
-            # Attach the final transcript/summary to each CRM call record created this call
-            if CRM_API_URL and CRM_TENANT_ID and nadia._voice_call_ids:
-                ce_url = f"{CRM_API_URL.rstrip('/')}/voice-bot/livekit/call-ended?tenantId={CRM_TENANT_ID}"
-                ce_headers = {"Content-Type": "application/json"}
-                if CRM_INGEST_SECRET:
-                    ce_headers["Authorization"] = f"Bearer {CRM_INGEST_SECRET}"
+            # Attach the final transcript/summary to each Supabase voice_bot_calls record (PATCH via PostgREST)
+            if SUPABASE_URL and SUPABASE_SERVICE_KEY and nadia._voice_call_ids:
+                dur = int((datetime.now(timezone.utc) - call_start).total_seconds())
+                patch_headers = {
+                    "Content-Type": "application/json",
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                }
                 async with aiohttp.ClientSession() as http:
                     for vcid in nadia._voice_call_ids:
                         try:
-                            await http.post(ce_url, json={
-                                "voiceCallId": vcid,
-                                "transcript": transcript,
-                                "summary": analysis.get("call_summary") if isinstance(analysis, dict) else None,
-                                "sentiment": analysis.get("caller_sentiment") if isinstance(analysis, dict) else None,
-                                "durationSeconds": int((datetime.now(timezone.utc) - call_start).total_seconds()),
-                            }, headers=ce_headers, timeout=aiohttp.ClientTimeout(total=10))
+                            await http.patch(
+                                f"{SUPABASE_URL.rstrip('/')}/rest/v1/voice_bot_calls?id=eq.{vcid}",
+                                json={
+                                    "transcript": transcript,
+                                    "summary": analysis.get("call_summary") if isinstance(analysis, dict) else None,
+                                    "sentiment": analysis.get("caller_sentiment") if isinstance(analysis, dict) else None,
+                                    "duration_seconds": dur,
+                                    "ended_at": datetime.now(timezone.utc).isoformat(),
+                                },
+                                headers=patch_headers, timeout=aiohttp.ClientTimeout(total=10),
+                            )
                         except Exception as e:
-                            logger.error(f"CRM call-ended POST failed: {e}")
+                            logger.error(f"Supabase call-ended PATCH failed: {e}")
 
             payload = {
                 "agent": AGENT_NAME,
