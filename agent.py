@@ -72,10 +72,13 @@ USE_UPLIFT           = bool(UPLIFTAI_API_KEY) and HAS_UPLIFTAI
 
 DASHBOARD_URL    = os.getenv("DASHBOARD_URL", "")
 CRM_WEBHOOK_URL  = os.getenv("CRM_WEBHOOK_URL", "")
-# Supabase (server-less backend) — Nadia creates complaints via the create_complaint RPC
-SUPABASE_URL         = os.getenv("SUPABASE_URL", "")          # https://<ref>.supabase.co
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")  # service_role key (Settings → API)
-CRM_TENANT_ID        = os.getenv("CRM_TENANT_ID", "")         # tenant UUID
+# CRM API (Fastify backend) — Nadia files complaints via the voice-bot LiveKit endpoint
+CRM_API_URL       = os.getenv("CRM_API_URL", "")             # e.g. http://127.0.0.1:3000
+CRM_INGEST_SECRET = os.getenv("CRM_INGEST_SECRET", "")       # must match API's LIVEKIT_INGEST_SECRET
+CRM_TENANT_ID     = os.getenv("CRM_TENANT_ID", "")           # tenant UUID
+# Supabase (legacy/optional — no longer used for complaint creation)
+SUPABASE_URL         = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 AGENT_NAME       = os.getenv("AGENT_NAME", "nadia")
 HELPLINE        = os.getenv("HELPLINE", "111-42-5000")
 
@@ -270,24 +273,23 @@ class NadiaAgent(Agent):
 
     async def _create_crm_ticket(self, name: str, category: str, priority: str,
                                  description: str, fraud_amount: str) -> str:
-        """Create the complaint via the Supabase `create_complaint` RPC (server-less) and
-        return its TKT number. Falls back to a local reference if Supabase is unreachable."""
-        if SUPABASE_URL and SUPABASE_SERVICE_KEY and CRM_TENANT_ID:
-            url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/rpc/create_complaint"
-            headers = {
-                "Content-Type": "application/json",
-                "apikey": SUPABASE_SERVICE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-            }
+        """Create the complaint via the CRM API's voice-bot LiveKit endpoint and return
+        its TKT number. Falls back to a local reference if the CRM is unreachable."""
+        if CRM_API_URL and CRM_TENANT_ID:
+            url = (f"{CRM_API_URL.rstrip('/')}/api/v1/voice-bot/livekit/complaint"
+                   f"?tenantId={CRM_TENANT_ID}")
+            headers = {"Content-Type": "application/json"}
+            if CRM_INGEST_SECRET:
+                headers["Authorization"] = f"Bearer {CRM_INGEST_SECRET}"
             payload = {
-                "p_tenant_id":     CRM_TENANT_ID,
-                "p_reporter_name": name,
-                "p_reporter_phone": self.caller_phone,
-                "p_category":      category,
-                "p_priority":      priority,
-                "p_subject":       description[:120],
-                "p_description":   description,
-                "p_fraud_amount":  fraud_amount,
+                "reporterName":  name,
+                "reporterPhone": self.caller_phone,
+                "category":      category,
+                "priority":      priority,
+                "subject":       description[:120],
+                "description":   description,
+                "fraudAmount":   fraud_amount,
+                "callId":        getattr(self, "room_name", None),
             }
             try:
                 async with aiohttp.ClientSession() as s:
@@ -298,10 +300,10 @@ class NadiaAgent(Agent):
                             if data.get("voiceCallId"):
                                 self._voice_call_ids.append(data["voiceCallId"])
                             return data["ticketNumber"]
-                        logger.error(f"Supabase create_complaint returned: {data}")
+                        logger.error(f"CRM complaint create returned: {data}")
             except Exception as e:
-                logger.error(f"Supabase complaint create failed: {e}")
-        return _gen_reference()  # fallback if Supabase unreachable
+                logger.error(f"CRM complaint create failed: {e}")
+        return _gen_reference()  # fallback if CRM unreachable
 
 
 # ── Backend posting (dashboard + CRM) ──────────────────────────────────────────
