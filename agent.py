@@ -467,30 +467,30 @@ async def entrypoint(ctx: JobContext):
                 pass
             analysis = await analyze_call(transcript)
 
-            # Attach the final transcript/summary to each Supabase voice_bot_calls record (PATCH via PostgREST)
-            if SUPABASE_URL and SUPABASE_SERVICE_KEY and nadia._voice_call_ids:
+            # Attach the final transcript/summary to each CRM voice_bot_calls record
+            if CRM_API_URL and CRM_TENANT_ID and nadia._voice_call_ids:
                 dur = int((datetime.now(timezone.utc) - call_start).total_seconds())
-                patch_headers = {
-                    "Content-Type": "application/json",
-                    "apikey": SUPABASE_SERVICE_KEY,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                }
+                ce_url = (f"{CRM_API_URL.rstrip('/')}/api/v1/voice-bot/livekit/call-ended"
+                          f"?tenantId={CRM_TENANT_ID}")
+                ce_headers = {"Content-Type": "application/json"}
+                if CRM_INGEST_SECRET:
+                    ce_headers["Authorization"] = f"Bearer {CRM_INGEST_SECRET}"
                 async with aiohttp.ClientSession() as http:
                     for vcid in nadia._voice_call_ids:
                         try:
-                            await http.patch(
-                                f"{SUPABASE_URL.rstrip('/')}/rest/v1/voice_bot_calls?id=eq.{vcid}",
+                            await http.post(
+                                ce_url,
                                 json={
+                                    "voiceCallId": vcid,
                                     "transcript": transcript,
                                     "summary": analysis.get("call_summary") if isinstance(analysis, dict) else None,
                                     "sentiment": analysis.get("caller_sentiment") if isinstance(analysis, dict) else None,
-                                    "duration_seconds": dur,
-                                    "ended_at": datetime.now(timezone.utc).isoformat(),
+                                    "durationSeconds": dur,
                                 },
-                                headers=patch_headers, timeout=aiohttp.ClientTimeout(total=10),
+                                headers=ce_headers, timeout=aiohttp.ClientTimeout(total=10),
                             )
                         except Exception as e:
-                            logger.error(f"Supabase call-ended PATCH failed: {e}")
+                            logger.error(f"CRM call-ended POST failed: {e}")
 
             payload = {
                 "agent": AGENT_NAME,
