@@ -1,8 +1,9 @@
-# Full single-VPS stack: Redis + LiveKit server + Caddy (TLS) + Nadia agent.
+# Full single-VPS stack: Redis + LiveKit server + Caddy (TLS) + 3 voice agents.
 # All on host networking so they talk over localhost and WebRTC UDP works.
 #
 # Fresh VPS:            docker compose up -d --build
-# Existing LiveKit VPS: docker compose up -d --build --no-deps nadia   (agent only)
+# Restart all agents:   docker compose up -d --force-recreate nadia sara zara
+# Restart one agent:    docker compose up -d --force-recreate sara
 
 services:
   redis:
@@ -32,10 +33,34 @@ services:
 
   nadia:
     build: .
+    image: voice-agents:latest
     network_mode: host
     env_file: .env
+    environment:
+      AGENT_NAME: nadia
+    command: ["python", "agent.py", "start"]
     restart: unless-stopped
     depends_on: [livekit]
+
+  sara:
+    image: voice-agents:latest
+    network_mode: host
+    env_file: .env
+    environment:
+      SARA_AGENT_NAME: sara
+    command: ["python", "sara.py", "start"]
+    restart: unless-stopped
+    depends_on: [livekit, nadia]
+
+  zara:
+    image: voice-agents:latest
+    network_mode: host
+    env_file: .env
+    environment:
+      ZARA_AGENT_NAME: zara
+    command: ["python", "zara.py", "start"]
+    restart: unless-stopped
+    depends_on: [livekit, nadia]
 
 volumes:
   caddy_data:

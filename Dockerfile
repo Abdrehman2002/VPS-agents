@@ -10,10 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY agent.py .
+COPY agent.py sara.py zara.py ./
 
 # Pre-download plugin model files (turn detector, Silero VAD) so the first call is instant
 RUN python agent.py download-files || true
 
-# Production worker (connects to LIVEKIT_URL from env, dispatched by agent_name)
+# Default command (compose overrides per service to run the right agent)
 CMD ["python", "agent.py", "start"]
