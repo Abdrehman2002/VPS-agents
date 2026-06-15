@@ -449,5 +449,6 @@ if __name__ == "__main__":
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
             agent_name=AGENT_NAME,
+            port=int(os.getenv("WORKER_PORT", "8082")),
         )
     )

@@ -48,6 +48,7 @@ services:
     env_file: .env
     environment:
       SARA_AGENT_NAME: sara
+      WORKER_PORT: "8082"   # avoid collision with nadia (8081) on host network
     command: ["python", "sara.py", "start"]
     restart: unless-stopped
     depends_on: [livekit, nadia]
@@ -58,6 +59,7 @@ services:
     env_file: .env
     environment:
       ZARA_AGENT_NAME: zara
+      WORKER_PORT: "8083"   # avoid collision with nadia (8081) and sara (8082)
     command: ["python", "zara.py", "start"]
     restart: unless-stopped
     depends_on: [livekit, nadia]
