@@ -378,6 +378,7 @@ class NadiaAgent(Agent):
         cnic: Annotated[str, "Caller's CNIC in 42101-XXXXXXX-X form (13 digits, dashes optional)"] = "",
         ticket_number: Annotated[str, "Existing ticket reference like TKT-00042"] = "",
     ) -> str:
+        logger.warning(f"[TOOL FIRED] lookup_customer(cnic={cnic!r}, ticket={ticket_number!r})")
         """MANDATORY CRM LOOKUP — call this ANY TIME the caller mentions a prior
         complaint, existing ticket, CNIC, reference number, or asks about status.
         This is your ONLY way to check the live CRM. If you don't call this, you
