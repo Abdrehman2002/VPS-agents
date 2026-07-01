@@ -141,6 +141,16 @@ The moment ANY of the above appears, do this:
   STEP 1: Say ONLY "Zaroor. Aap ka CNIC ya reference number bata dein?"
   STEP 2: When they give you EITHER a CNIC OR a TKT-number, IMMEDIATELY call:
              lookup_customer(cnic="...")   OR   lookup_customer(ticket_number="...")
+
+  ⚠️ CNIC CAPTURE (STT often mishears long digit runs — use CHUNKS):
+    Ideal capture: ask for CNIC in 3 chunks with confirmation between each:
+      a. "Pehle 5 digits batayein?" → they say 5 digits → repeat back: "42101, theek hai?"
+      b. "Ab agle 7 digits?" → they say 7 → repeat back
+      c. "Aur aakhri 1 digit?" → they say 1 → repeat back
+      d. NOW call lookup_customer with the full 13-digit CNIC.
+    If they just rattle off all 13 at once, still try to call lookup_customer — but
+    if the tool response says "INVALID CNIC FORMAT", DO NOT tell the caller their
+    CNIC is wrong — instead follow the tool's suggested re-ask in chunks.
   STEP 3: READ the tool's response. It will start with either:
              "MATCH FOUND"   → ask for last-4 CNIC digits to verify, then disclose
              "NO MATCH"      → say naturally "Chalein, main aap ki nayi complaint
@@ -403,13 +413,29 @@ class NadiaAgent(Agent):
         if not cnic and not ticket_number:
             return "LOOKUP SKIPPED: need CNIC or ticket number. Ask the caller for one."
 
+        # Guard against STT dropouts. Urdu STT often mishears long digit runs and
+        # OpenAI fills the gap with '.' or '_'. Detect this BEFORE hitting the
+        # CRM so we can prompt the LLM to re-ask instead of getting a false miss.
+        cnic_digits = ""
+        if cnic:
+            cnic_digits = "".join(ch for ch in cnic if ch.isdigit())
+            if len(cnic_digits) != 13:
+                logger.warning(f"[TOOL] CNIC parse failed: {cnic!r} → {cnic_digits!r} "
+                               f"(got {len(cnic_digits)} digits, need 13)")
+                return (
+                    "INVALID CNIC FORMAT — the caller's CNIC came through unclear "
+                    f"(as {cnic!r}, only {len(cnic_digits)} valid digits). "
+                    "Do NOT tell the caller their CNIC is invalid — the STT hiccuped. "
+                    "Instead say naturally: \"Maazrat, aap ka CNIC number thora clearly "
+                    "nahi sunayi diya. Kya aap dobara batayein — pehle 5 digits, phir 7 "
+                    "digits, phir aakhri 1 digit?\" and then call lookup_customer again "
+                    "with the corrected CNIC."
+                )
+
         url = (f"{CRM_API_URL.rstrip('/')}/api/v1/voice-bot/livekit/lookup"
                f"?tenantId={CRM_TENANT_ID}")
-        if cnic:
-            # Normalise CNIC: strip non-digits, format as 5-7-1
-            d = "".join(ch for ch in cnic if ch.isdigit())
-            if len(d) == 13:
-                url += f"&cnic={d[:5]}-{d[5:12]}-{d[12]}"
+        if cnic_digits and len(cnic_digits) == 13:
+            url += f"&cnic={cnic_digits[:5]}-{cnic_digits[5:12]}-{cnic_digits[12]}"
         if ticket_number:
             url += f"&ticket={ticket_number.strip()}"
 

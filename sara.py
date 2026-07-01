@@ -345,12 +345,27 @@ class SaraAgent(Agent):
         if not cnic and not ticket_number:
             return "LOOKUP SKIPPED: need CNIC or ticket number. Ask the caller for one."
 
+        # STT guard — see agent.py lookup_customer for full rationale.
+        cnic_digits = ""
+        if cnic:
+            cnic_digits = "".join(ch for ch in cnic if ch.isdigit())
+            if len(cnic_digits) != 13:
+                logger.warning(f"[TOOL] CNIC parse failed: {cnic!r} → {cnic_digits!r} "
+                               f"(got {len(cnic_digits)} digits, need 13)")
+                return (
+                    "INVALID CNIC FORMAT — the caller's CNIC came through unclear "
+                    f"(as {cnic!r}, only {len(cnic_digits)} valid digits). "
+                    "Do NOT tell the caller their CNIC is invalid — the STT hiccuped. "
+                    "Instead say naturally: \"Maazrat, aap ka CNIC number thora clearly "
+                    "nahi sunayi diya. Kya aap dobara batayein — pehle 5 digits, phir 7 "
+                    "digits, phir aakhri 1 digit?\" and then call lookup_customer again "
+                    "with the corrected CNIC."
+                )
+
         url = (f"{CRM_API_URL.rstrip('/')}/api/v1/voice-bot/livekit/lookup"
                f"?tenantId={CRM_TENANT_ID}")
-        if cnic:
-            d = "".join(ch for ch in cnic if ch.isdigit())
-            if len(d) == 13:
-                url += f"&cnic={d[:5]}-{d[5:12]}-{d[12]}"
+        if cnic_digits and len(cnic_digits) == 13:
+            url += f"&cnic={cnic_digits[:5]}-{cnic_digits[5:12]}-{cnic_digits[12]}"
         if ticket_number:
             url += f"&ticket={ticket_number.strip()}"
 
