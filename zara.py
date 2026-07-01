@@ -332,6 +332,7 @@ class ZaraAgent(Agent):
                 "agent": AGENT_NAME,
                 "reporterName":  record["caller_name"],
                 "reporterPhone": record["caller_phone"],
+                "reporterNic":   record.get("caller_cnic"),  # CRM matches/creates contact by CNIC
                 "city":          record["caller_city"],
                 "productInterest": record["product_interest"],
                 "loanPurpose":   record["loan_purpose"],

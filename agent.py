@@ -206,7 +206,16 @@ SLA WORDING (the tool gives you the right one — say it as returned):
   P3 → "7 working days mein hamari team jawab degi."
   P4 → "10 se 15 working days mein response milega."
 
-EXISTING COMPLAINT: "Aap ka reference number kya hai?" → "Note kar liya. Existing complaint ka live status main access nahi kar sakti — {HELPLINE} pe call karein ya branch jaayein reference number le ke. Kya aap ise escalate karna chahte hain ya nayi update?" Agar escalate → naya complaint register karo (verify → category → tool).
+EXISTING COMPLAINT (with lookup_customer tool):
+  Agar caller pehle se complaint mention kare ya TKT reference number de → CALL lookup_customer(ticket_number="TKT-XXXXX") SILENTLY.
+  Agar sirf CNIC mile pehle → CALL lookup_customer(cnic="XXXXX-XXXXXXX-X") SILENTLY.
+  Tool response mein "MATCH FOUND" ho toh:
+    a. IDENTITY VERIFY karo pehle: "Confirm karne ke liye, aap apne CNIC ke aakhri 4 digits bata dein?"
+    b. Digits match hon → tabhi ticket status/subject caller ko batao. NEVER speak full CNIC or full name.
+    c. Digits match nahi hon YA caller na batayein → "Maazrat, mujhe aap ki record nahi mili. Ek naya complaint register karte hain?" — NEVER reveal any details from the lookup.
+  Tool response "NO MATCH" ho → proceed as new caller, don't mention lookup.
+  Tool response "LOOKUP FAILED" ho → chup chaap naya complaint flow start karo, caller ko error mat batao.
+  ⚠️ SECURITY: Full CNIC ya poora naam KABHI out loud mat kaho. Sirf first name aur last-4-verify use karo.
 
 CUSTOMER RIGHTS: Har customer ko complaint register karne aur reference number ka haq hai. Agar bank 45 din mein resolve na kare toh State Bank Banking Mohtasib se bhi shikayat ho sakti hai.
 
@@ -257,8 +266,16 @@ class NadiaAgent(Agent):
         pri = _norm_priority(priority)
         sla = SLA_TEXT[pri]
 
+        # Extract CNIC from the account_or_cnic field if it looks like one
+        # (Pakistani CNIC is 13 digits with optional dashes — 5-7-1 pattern).
+        cnic_val: str | None = None
+        if account_or_cnic and account_or_cnic != "Not provided":
+            digits_only = "".join(ch for ch in account_or_cnic if ch.isdigit())
+            if len(digits_only) == 13:
+                cnic_val = f"{digits_only[:5]}-{digits_only[5:12]}-{digits_only[12]}"
+
         # Create the ticket in the Itqan CRM and read back the official TKT number.
-        ref = await self._create_crm_ticket(caller_name, cat, pri, description, fraud_amount)
+        ref = await self._create_crm_ticket(caller_name, cat, pri, description, fraud_amount, cnic_val)
 
         record = {
             "reference_number": ref,
@@ -283,8 +300,83 @@ class NadiaAgent(Agent):
             f"(مثلاً «ٹی کے ٹی، صفر صفر صفر صفر ایک»), repeat it once, then state the SLA exactly in Urdu."
         )
 
+    @function_tool
+    async def lookup_customer(
+        self,
+        cnic: Annotated[str, "Caller's CNIC in 42101-XXXXXXX-X form (13 digits, dashes optional)"] = "",
+        ticket_number: Annotated[str, "Existing ticket reference like TKT-00042"] = "",
+    ) -> str:
+        """Look up the caller's identity + open ticket history in the CRM.
+
+        Call this SILENTLY as soon as the caller mentions an ongoing complaint,
+        gives you a CNIC, or reads out a ticket number. Response is MASKED —
+        you MUST verify identity by asking for the LAST 4 DIGITS of their CNIC
+        BEFORE revealing any ticket details back to them. If the caller
+        cannot confirm the last 4 digits, apologise politely and do NOT
+        disclose anything from the lookup.
+        """
+        if not CRM_API_URL or not CRM_TENANT_ID:
+            return "LOOKUP UNAVAILABLE: CRM not configured. Proceed as new caller."
+        if not cnic and not ticket_number:
+            return "LOOKUP SKIPPED: need CNIC or ticket number. Ask the caller for one."
+
+        url = (f"{CRM_API_URL.rstrip('/')}/api/v1/voice-bot/livekit/lookup"
+               f"?tenantId={CRM_TENANT_ID}")
+        if cnic:
+            # Normalise CNIC: strip non-digits, format as 5-7-1
+            d = "".join(ch for ch in cnic if ch.isdigit())
+            if len(d) == 13:
+                url += f"&cnic={d[:5]}-{d[5:12]}-{d[12]}"
+        if ticket_number:
+            url += f"&ticket={ticket_number.strip()}"
+
+        headers = {}
+        if CRM_INGEST_SECRET:
+            headers["Authorization"] = f"Bearer {CRM_INGEST_SECRET}"
+
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers,
+                                 timeout=aiohttp.ClientTimeout(total=2)) as r:
+                    data = await r.json()
+        except Exception as e:
+            logger.error(f"lookup_customer failed: {e}")
+            return "LOOKUP FAILED: continue as if new caller. Do not mention the failure to the caller."
+
+        if not data.get("found"):
+            return "NO MATCH: this caller has no prior record. Proceed with fresh complaint registration flow."
+
+        # Build a TTS-friendly summary. Bot MUST verify last-4-CNIC before saying any of this out loud.
+        summary = [
+            f"MATCH FOUND (do NOT read out yet — verify identity first).",
+            f"Contact display name: {data.get('displayName')}.",
+            f"CNIC masked: {data.get('cnicMasked')}.",
+            f"Total tickets: {data.get('totalTicketCount')}. Open: {data.get('openTicketCount')}.",
+        ]
+        if data.get("hasCriticalOpen"):
+            summary.append("HAS URGENT OPEN TICKET — be extra empathetic.")
+        latest = data.get("latestTicket")
+        if latest:
+            summary.append(
+                f"Latest ticket: {latest.get('number')}, subject '{latest.get('subject')}', "
+                f"status {latest.get('status')}, priority {latest.get('priority')}, "
+                f"created {latest.get('daysAgo')} days ago"
+            )
+            if latest.get("assigneeFirstName"):
+                summary.append(f"assigned to {latest.get('assigneeFirstName')}")
+            if latest.get("slaHoursLeft") is not None:
+                summary.append(f"SLA {latest.get('slaHoursLeft')} hours remaining")
+        summary.append(
+            "NEXT STEP: ask the caller to confirm the LAST 4 DIGITS of their CNIC. "
+            "If they match the masked value's last digit + a plausible pattern, proceed. "
+            "If not, do NOT disclose any of the above. Say you could not find the record "
+            "and offer to register a new complaint."
+        )
+        return " ".join(summary)
+
     async def _create_crm_ticket(self, name: str, category: str, priority: str,
-                                 description: str, fraud_amount: str) -> str:
+                                 description: str, fraud_amount: str,
+                                 cnic: str | None = None) -> str:
         """Create the complaint via the CRM API's voice-bot LiveKit endpoint and return
         its TKT number. Falls back to a local reference if the CRM is unreachable."""
         if CRM_API_URL and CRM_TENANT_ID:
@@ -296,6 +388,7 @@ class NadiaAgent(Agent):
             payload = {
                 "reporterName":  name,
                 "reporterPhone": self.caller_phone,
+                "reporterNic":   cnic,     # CRM matches or creates contact by CNIC
                 "category":      category,
                 "priority":      priority,
                 "subject":       description[:120],
