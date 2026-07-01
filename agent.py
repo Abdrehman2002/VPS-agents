@@ -137,20 +137,31 @@ ANY of these words/concepts:
   • "WhatsApp" par shikayat / message
   • "aap ki team ne / bank ne kya kiya"
 
-The moment ANY of the above appears, do this:
-  STEP 1: Say ONLY "Zaroor. Aap ka CNIC ya reference number bata dein?"
-  STEP 2: When they give you EITHER a CNIC OR a TKT-number, IMMEDIATELY call:
-             lookup_customer(cnic="...")   OR   lookup_customer(ticket_number="...")
+The moment ANY of the above appears, use the EASY 2-question identity flow:
 
-  ⚠️ CNIC CAPTURE (STT often mishears long digit runs — use CHUNKS):
-    Ideal capture: ask for CNIC in 3 chunks with confirmation between each:
-      a. "Pehle 5 digits batayein?" → they say 5 digits → repeat back: "42101, theek hai?"
-      b. "Ab agle 7 digits?" → they say 7 → repeat back
-      c. "Aur aakhri 1 digit?" → they say 1 → repeat back
-      d. NOW call lookup_customer with the full 13-digit CNIC.
-    If they just rattle off all 13 at once, still try to call lookup_customer — but
-    if the tool response says "INVALID CNIC FORMAT", DO NOT tell the caller their
-    CNIC is wrong — instead follow the tool's suggested re-ask in chunks.
+  STEP 1: Ask NAME first.
+     "Zaroor. Sab se pehle, aap ka poora naam kya hai?"
+     Repeat back for confirmation: "Ahmed Raza, sahi hai?"
+
+  STEP 2: Ask ONLY the LAST 4 DIGITS of CNIC (NOT the full 13):
+     "Aap ke CNIC ke sirf aakhri 4 digits batayein?"
+     Repeat back digit-by-digit: "Zero, zero, two, four — sahi?"
+
+  STEP 3: NOW call lookup_customer with BOTH values:
+     lookup_customer(caller_name="Ahmed Raza", cnic_last4="0024")
+
+  ⚠️ NEVER ask for the full 13-digit CNIC by default. Long digit runs are
+     unreliable over phone STT. Name + last-4 is the standard flow.
+
+  ⚠️ ONLY ask for the full CNIC if the tool responds with AMBIGUOUS (multiple
+     contacts matched). In that case ask in chunks:
+       "Aap ke CNIC ke pehle 5 digits?" → repeat back
+       "Ab agle 7 digits?" → repeat back
+       "Aur aakhri 1 digit?" → repeat back
+     THEN call lookup_customer again with cnic="FULL-13-DIGIT-CNIC".
+
+  ⚠️ If caller VOLUNTEERS a TKT reference number, use that instead:
+     lookup_customer(ticket_number="TKT-01059")
   STEP 3: READ the tool's response. It will start with either:
              "MATCH FOUND"   → ask for last-4 CNIC digits to verify, then disclose
              "NO MATCH"      → say naturally "Chalein, main aap ki nayi complaint
@@ -259,45 +270,50 @@ SLA WORDING (the tool gives you the right one — say it as returned):
 EXISTING COMPLAINT (with lookup_customer tool):
 
   ⚠️ CRITICAL: When caller mentions any prior complaint / call / WhatsApp / ticket / issue,
-  you MUST call lookup_customer BEFORE anything else. Both CNIC AND ticket number work —
-  ask for WHICHEVER they have.
+  you MUST call lookup_customer BEFORE anything else.
 
-  STEP 1 — Ask for identifier (Urdu):
-    "Zaroor. Aap ka reference number ya CNIC number bata dein? Dono mein se koi bhi
-     kaam kar dega."
-    Agar sirf ek de → wahi use karo. Agar dono de → CNIC prefer karo (safer).
+  STEP 1 — Ask FULL NAME first:
+    "Zaroor. Sab se pehle, aap ka poora naam kya hai?"
+    Repeat back: "[Name], sahi hai?"
 
-  STEP 2 — Call the tool SILENTLY (do not tell the caller you are "checking"):
-    • CNIC mile: lookup_customer(cnic="42101-1234567-8")
-    • TKT mile:  lookup_customer(ticket_number="TKT-01059")
-    • Dono mile: lookup_customer(cnic=..., ticket_number=...)
+  STEP 2 — Ask ONLY LAST 4 DIGITS of CNIC:
+    "Ab aap ke CNIC ke sirf aakhri 4 digits batayein?"
+    Repeat digit-by-digit: "Zero, zero, two, four — sahi?"
 
-  STEP 3 — Handle the tool response:
+  STEP 3 — Call the tool SILENTLY with BOTH values:
+    lookup_customer(caller_name="Ahmed Raza", cnic_last4="0024")
+
+  DO NOT ask for the full 13-digit CNIC by default. Name + last-4 is the standard.
+
+  STEP 4 — Handle the tool response:
 
     A) Response starts with "MATCH FOUND":
-       a. Verify identity FIRST: "Confirm karne ke liye, apne CNIC ke aakhri 4 digits bata dein?"
-       b. Digits match kar rahe hon (aakhri check digit + reasonable pattern) → tabhi ticket
-          status/subject/assignee caller ko batao.
-       c. Digits match NAHI kar rahe → "Maazrat, main aap ki record verify nahi kar payi.
-          Aap ki nayi complaint register karte hain — masla batayein."
-          THEN proceed with NEW COMPLAINT flow. NEVER read out details from the lookup.
+       On the name+last4 path the tool sets verificationRequired='none' — the
+       two signals ARE the verification. Read the ticket status/subject/assignee
+       directly. Do NOT ask for extra verification on this path.
 
-    B) Response is "NO MATCH: this caller has no prior record":
-       → DO NOT say "we don't have info" or "record nahi mili" or ANYTHING that reveals
-         the lookup returned nothing. That leaks the tool call.
-       → INSTEAD say naturally: "Chalein, main aap ki complaint fresh register karti hoon.
-         Please masla batayein." Then proceed with NEW COMPLAINT flow.
-       → IMPORTANT: The CNIC they gave is STILL VALUABLE. Pass it into register_complaint's
-         account_or_cnic parameter so it gets saved on the new ticket + contact.
+    B) Response starts with "AMBIGUOUS" (or found=false with ambiguous flag):
+       Multiple contacts share the same last 4 digits. Ask for the FULL CNIC
+       in 3 chunks (5, then 7, then 1) with readback each time. Then call
+       lookup_customer(cnic="FULL-13-DIGIT-CNIC").
 
-    C) Response starts with "LOOKUP FAILED" or "LOOKUP UNAVAILABLE":
-       → Same as NO MATCH: silently start NEW COMPLAINT flow without mentioning failure.
+    C) Response is "NO MATCH":
+       DO NOT say "record nahi mili" or "we don't have info" or leak the lookup.
+       INSTEAD say naturally: "Chalein, main aap ki complaint fresh register
+       karti hoon. Please masla batayein." Then proceed with NEW COMPLAINT flow.
+       IMPORTANT: the last 4 CNIC digits they gave are STILL valuable — pass them
+       into register_complaint's account_or_cnic parameter so the new contact
+       captures what we know.
+
+    D) Response starts with "LOOKUP FAILED" or "LOOKUP UNAVAILABLE" or "STT HICCUP":
+       Same as NO MATCH: silently start NEW COMPLAINT flow without mentioning
+       failure. If tool says STT HICCUP, follow its suggested re-ask.
 
   ⚠️ SECURITY (never break):
    • Full CNIC ya poora naam KABHI out loud mat kaho.
-   • Sirf first name + last-4-digits verification use karo.
-   • Lookup miss ya failure ke baare mein caller ko HINT bhi mat do — bas nayi complaint pe
-     transition ho jao.
+   • Only speak last 4 digits when confirming input.
+   • Lookup miss ya failure ke baare mein caller ko HINT bhi mat do — bas nayi
+     complaint pe transition ho jao.
 
 CUSTOMER RIGHTS: Har customer ko complaint register karne aur reference number ka haq hai. Agar bank 45 din mein resolve na kare toh State Bank Banking Mohtasib se bhi shikayat ho sakti hai.
 
@@ -385,59 +401,76 @@ class NadiaAgent(Agent):
     @function_tool
     async def lookup_customer(
         self,
-        cnic: Annotated[str, "Caller's CNIC in 42101-XXXXXXX-X form (13 digits, dashes optional)"] = "",
-        ticket_number: Annotated[str, "Existing ticket reference like TKT-00042"] = "",
+        caller_name: Annotated[str, "Caller's full name as spoken (e.g. 'Ahmed Raza'). Preferred with cnic_last4."] = "",
+        cnic_last4: Annotated[str, "Last 4 digits of the caller's CNIC (e.g. '0024'). Preferred — STT handles 4 digits reliably."] = "",
+        cnic: Annotated[str, "OPTIONAL: full CNIC 42101-XXXXXXX-X. Only if caller reads all 13 digits AND STT captured them."] = "",
+        ticket_number: Annotated[str, "OPTIONAL: existing ticket reference like TKT-00042 if caller provides one."] = "",
     ) -> str:
-        logger.warning(f"[TOOL FIRED] lookup_customer(cnic={cnic!r}, ticket={ticket_number!r})")
+        logger.warning(f"[TOOL FIRED] lookup_customer(name={caller_name!r}, last4={cnic_last4!r}, cnic={cnic!r}, ticket={ticket_number!r})")
         """MANDATORY CRM LOOKUP — call this ANY TIME the caller mentions a prior
-        complaint, existing ticket, CNIC, reference number, or asks about status.
-        This is your ONLY way to check the live CRM. If you don't call this, you
-        will HALLUCINATE and give the caller wrong information — that is a
-        production bug.
+        complaint, existing ticket, or asks about status.
 
-        Trigger phrases (any of these = call this tool immediately):
-          "pehle call ki thi" / "already complaint ki thi" / "meri complaint ka update"
-          "mera reference number hai X" / "TKT-XXXXX" / "status batayein"
-          "mera CNIC hai X" / any 13-digit number the caller reads out
-          "WhatsApp par shikayat ki thi" / any mention of prior interaction
+        PREFERRED CALL SHAPE (default — works reliably with Urdu STT):
+            lookup_customer(caller_name="Ahmed Raza", cnic_last4="0024")
 
-        Call with EITHER cnic OR ticket_number (or both). At least one is required.
+        Ask for FULL NAME first (STT captures names well), THEN the LAST 4
+        DIGITS of CNIC (short digit runs are STT-safe). Call this tool with
+        BOTH values — the CRM matches on the combination.
 
-        Response is MASKED for security. You MUST verify identity by asking for
-        the LAST 4 DIGITS of the caller's CNIC BEFORE reading any ticket details
-        out loud. Never speak the full CNIC or full name. If the tool returns
-        NO MATCH, do NOT tell the caller — silently switch to new-complaint flow.
+        FALLBACK shapes (only if caller volunteers them):
+            lookup_customer(cnic="42101-1234567-8")     — full CNIC
+            lookup_customer(ticket_number="TKT-01059")  — ticket number
+
+        Response semantics:
+          MATCH → tool returns ticket data with verificationRequired='none' on
+            the name+last4 path (the two signals ARE the verification). Share
+            status/subject/assignee immediately.
+          AMBIGUOUS → multiple contacts match; ask caller for the FULL CNIC in
+            3 chunks (5 digits → 7 digits → 1 digit) and call again with cnic=.
+          NO MATCH → silently switch to new-complaint flow. NEVER say "record
+            nahi mili" or "no info" or "helpline pe call karein" to the caller.
         """
         if not CRM_API_URL or not CRM_TENANT_ID:
             return "LOOKUP UNAVAILABLE: CRM not configured. Proceed as new caller."
-        if not cnic and not ticket_number:
-            return "LOOKUP SKIPPED: need CNIC or ticket number. Ask the caller for one."
 
-        # Guard against STT dropouts. Urdu STT often mishears long digit runs and
-        # OpenAI fills the gap with '.' or '_'. Detect this BEFORE hitting the
-        # CRM so we can prompt the LLM to re-ask instead of getting a false miss.
-        cnic_digits = ""
-        if cnic:
-            cnic_digits = "".join(ch for ch in cnic if ch.isdigit())
-            if len(cnic_digits) != 13:
-                logger.warning(f"[TOOL] CNIC parse failed: {cnic!r} → {cnic_digits!r} "
-                               f"(got {len(cnic_digits)} digits, need 13)")
+        # Preferred path: name + last-4-CNIC. Also accept fallback full-CNIC or
+        # ticket-number if the LLM chose those instead.
+        name_trim = (caller_name or "").strip()
+        last4_digits = "".join(ch for ch in (cnic_last4 or "") if ch.isdigit())[-4:]
+        cnic_digits = "".join(ch for ch in (cnic or "") if ch.isdigit())
+
+        have_name_last4 = bool(name_trim) and len(last4_digits) == 4
+        have_full_cnic  = len(cnic_digits) == 13
+        have_ticket     = bool((ticket_number or "").strip())
+
+        if not (have_name_last4 or have_full_cnic or have_ticket):
+            # Nothing usable. Instruct the LLM what to ask.
+            if cnic and len(cnic_digits) != 13:
+                logger.warning(f"[TOOL] CNIC parse failed: {cnic!r} → {cnic_digits!r}")
                 return (
-                    "INVALID CNIC FORMAT — the caller's CNIC came through unclear "
-                    f"(as {cnic!r}, only {len(cnic_digits)} valid digits). "
-                    "Do NOT tell the caller their CNIC is invalid — the STT hiccuped. "
-                    "Instead say naturally: \"Maazrat, aap ka CNIC number thora clearly "
-                    "nahi sunayi diya. Kya aap dobara batayein — pehle 5 digits, phir 7 "
-                    "digits, phir aakhri 1 digit?\" and then call lookup_customer again "
-                    "with the corrected CNIC."
+                    "STT HICCUP — the CNIC came through unclear. Do NOT tell the "
+                    "caller their input is invalid. Instead ask for identity the "
+                    "EASY way: FIRST their full name, THEN just the LAST 4 DIGITS "
+                    "of their CNIC. Then call lookup_customer(caller_name=..., "
+                    "cnic_last4=...) — this is far more reliable than the full 13 "
+                    "digits."
                 )
+            return (
+                "LOOKUP NEEDS INPUT — ask the caller for their FULL NAME first, "
+                "THEN the LAST 4 DIGITS of their CNIC. Call lookup_customer with "
+                "caller_name and cnic_last4."
+            )
 
         url = (f"{CRM_API_URL.rstrip('/')}/api/v1/voice-bot/livekit/lookup"
                f"?tenantId={CRM_TENANT_ID}")
-        if cnic_digits and len(cnic_digits) == 13:
+        # Preference: full CNIC > ticket > name+last4 (endpoint checks in that order).
+        if have_full_cnic:
             url += f"&cnic={cnic_digits[:5]}-{cnic_digits[5:12]}-{cnic_digits[12]}"
-        if ticket_number:
+        if have_ticket:
             url += f"&ticket={ticket_number.strip()}"
+        if have_name_last4:
+            from urllib.parse import quote_plus
+            url += f"&name={quote_plus(name_trim)}&last4={last4_digits}"
 
         headers = {}
         if CRM_INGEST_SECRET:

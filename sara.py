@@ -328,46 +328,71 @@ class SaraAgent(Agent):
     @function_tool
     async def lookup_customer(
         self,
-        cnic: Annotated[str, "Caller's CNIC in 42101-XXXXXXX-X form (13 digits, dashes optional)"] = "",
-        ticket_number: Annotated[str, "Existing ticket reference like TKT-00042"] = "",
+        caller_name: Annotated[str, "Caller's full name as spoken (e.g. 'Ahmed Raza'). Preferred with cnic_last4."] = "",
+        cnic_last4: Annotated[str, "Last 4 digits of the caller's CNIC (e.g. '0024'). Preferred — STT handles 4 digits reliably."] = "",
+        cnic: Annotated[str, "OPTIONAL: full CNIC 42101-XXXXXXX-X. Only if caller reads all 13 digits AND STT captured them."] = "",
+        ticket_number: Annotated[str, "OPTIONAL: existing ticket reference like TKT-00042 if caller provides one."] = "",
     ) -> str:
-        """Look up the caller's identity + open ticket history in the CRM.
+        """Look up caller identity + open ticket history in the CRM.
 
-        Call this SILENTLY as soon as the caller mentions an existing ticket,
-        prior call, WhatsApp complaint, or gives you a CNIC / ticket number.
-        Response is MASKED — you MUST verify identity by asking for the LAST 4
-        DIGITS of their CNIC BEFORE revealing any ticket details back to them.
-        If the caller cannot confirm the last 4 digits, apologise politely and
-        do NOT disclose anything from the lookup.
+        PREFERRED shape (STT-safe, use by default):
+            lookup_customer(caller_name="Ahmed Raza", cnic_last4="0024")
+
+        Ask the caller for their name and just the last 4 digits of their CNIC.
+        Do NOT ask for the full 13-digit CNIC by default.
+
+        Fallbacks (only if caller volunteers them):
+            lookup_customer(cnic="42101-1234567-8")
+            lookup_customer(ticket_number="TKT-01059")
+
+        Response semantics:
+          MATCH — on name+last4 the tool sets verificationRequired='none'; the
+            two signals ARE the verification. Share status/subject.
+          AMBIGUOUS — multiple contacts match; ask for full CNIC in chunks.
+          NO MATCH — say naturally: "Hamare record mein aap ki koi pending
+            ticket abhi register nahi hai. Kya main Nadia ko transfer kar
+            doon nayi shikayat register karne ke liye?"
+          LOOKUP FAILED / UNAVAILABLE — route to helpline politely.
+
+        NEVER speak the full CNIC or full name out loud.
         """
+        logger.warning(f"[TOOL FIRED] lookup_customer(name={caller_name!r}, last4={cnic_last4!r}, cnic={cnic!r}, ticket={ticket_number!r})")
         if not CRM_API_URL or not CRM_TENANT_ID:
-            return "LOOKUP UNAVAILABLE: CRM not configured. Proceed as new caller."
-        if not cnic and not ticket_number:
-            return "LOOKUP SKIPPED: need CNIC or ticket number. Ask the caller for one."
+            return "LOOKUP UNAVAILABLE: CRM not configured. Route caller to helpline."
 
-        # STT guard — see agent.py lookup_customer for full rationale.
-        cnic_digits = ""
-        if cnic:
-            cnic_digits = "".join(ch for ch in cnic if ch.isdigit())
-            if len(cnic_digits) != 13:
-                logger.warning(f"[TOOL] CNIC parse failed: {cnic!r} → {cnic_digits!r} "
-                               f"(got {len(cnic_digits)} digits, need 13)")
+        name_trim = (caller_name or "").strip()
+        last4_digits = "".join(ch for ch in (cnic_last4 or "") if ch.isdigit())[-4:]
+        cnic_digits = "".join(ch for ch in (cnic or "") if ch.isdigit())
+
+        have_name_last4 = bool(name_trim) and len(last4_digits) == 4
+        have_full_cnic  = len(cnic_digits) == 13
+        have_ticket     = bool((ticket_number or "").strip())
+
+        if not (have_name_last4 or have_full_cnic or have_ticket):
+            if cnic and len(cnic_digits) != 13:
+                logger.warning(f"[TOOL] CNIC parse failed: {cnic!r} → {cnic_digits!r}")
                 return (
-                    "INVALID CNIC FORMAT — the caller's CNIC came through unclear "
-                    f"(as {cnic!r}, only {len(cnic_digits)} valid digits). "
-                    "Do NOT tell the caller their CNIC is invalid — the STT hiccuped. "
-                    "Instead say naturally: \"Maazrat, aap ka CNIC number thora clearly "
-                    "nahi sunayi diya. Kya aap dobara batayein — pehle 5 digits, phir 7 "
-                    "digits, phir aakhri 1 digit?\" and then call lookup_customer again "
-                    "with the corrected CNIC."
+                    "STT HICCUP — the CNIC came through unclear. Do NOT tell the "
+                    "caller their input is invalid. Instead ask for identity the "
+                    "EASY way: FIRST their full name, THEN just the LAST 4 DIGITS "
+                    "of their CNIC. Then call lookup_customer(caller_name=..., "
+                    "cnic_last4=...)."
                 )
+            return (
+                "LOOKUP NEEDS INPUT — ask the caller for their FULL NAME first, "
+                "THEN the LAST 4 DIGITS of their CNIC. Call lookup_customer with "
+                "caller_name and cnic_last4."
+            )
 
         url = (f"{CRM_API_URL.rstrip('/')}/api/v1/voice-bot/livekit/lookup"
                f"?tenantId={CRM_TENANT_ID}")
-        if cnic_digits and len(cnic_digits) == 13:
+        if have_full_cnic:
             url += f"&cnic={cnic_digits[:5]}-{cnic_digits[5:12]}-{cnic_digits[12]}"
-        if ticket_number:
+        if have_ticket:
             url += f"&ticket={ticket_number.strip()}"
+        if have_name_last4:
+            from urllib.parse import quote_plus
+            url += f"&name={quote_plus(name_trim)}&last4={last4_digits}"
 
         headers = {}
         if CRM_INGEST_SECRET:
