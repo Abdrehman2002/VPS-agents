@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 import aiohttp
 from dotenv import load_dotenv
 
+from typing import Annotated
+
 from livekit import agents
 from livekit.agents import (
     Agent,
@@ -29,6 +31,7 @@ from livekit.agents import (
     WorkerOptions,
     RoomInputOptions,
     AutoSubscribe,
+    function_tool,
 )
 from livekit.agents import llm, stt, tts
 from livekit.plugins import openai as lk_openai
@@ -251,6 +254,46 @@ CONVERSATION FLOW:
    - Branch timing / location → give branch info.
    - Account balance / transaction history → SCOPE BOUNDARY — refer to app/branch.
    - Complaint → SCOPE BOUNDARY — refer to Nadia / {HELPLINE}.
+   - EXISTING ticket / prior call / WhatsApp complaint / status query → use lookup_customer flow below.
+
+═══════════════════════════════════════════════════════════════════════════════
+EXISTING TICKET STATUS CHECK (with lookup_customer tool):
+
+  ⚠️ When caller mentions any prior complaint / call / WhatsApp / ticket / status query,
+  call lookup_customer BEFORE anything else. Both CNIC AND ticket number work.
+
+  STEP 1 — Ask for identifier (Urdu):
+    "Zaroor. Aap ka reference number ya CNIC number bata dein? Dono mein se koi bhi
+     kaam kar dega."
+    Agar dono de → CNIC prefer karo (safer). Agar sirf ek → wahi use karo.
+
+  STEP 2 — Call lookup_customer SILENTLY (no "let me check" preamble).
+    • CNIC:   lookup_customer(cnic="42101-1234567-8")
+    • Ticket: lookup_customer(ticket_number="TKT-01059")
+    • Both:   lookup_customer(cnic=..., ticket_number=...)
+
+  STEP 3 — Handle tool response:
+
+    A) "MATCH FOUND":
+       a. Verify FIRST: "Confirm karne ke liye, apne CNIC ke aakhri 4 digits bata dein?"
+       b. Digits match → share ticket status/subject/assignee (never full CNIC or name).
+       c. Digits do NOT match → "Maazrat, main aap ki record verify nahi kar payi.
+          Nadia ko transfer karti hoon ya {HELPLINE} pe call karein."
+
+    B) "NO MATCH":
+       → DO NOT leak the miss. Say naturally: "Hamare record mein aap ki koi
+         pending ticket abhi register nahi hai. Agar aap nayi shikayat register
+         karna chahte hain, Nadia se baat karwa deti hoon. Warna koi aur sawaal?"
+
+    C) "LOOKUP FAILED" / "LOOKUP UNAVAILABLE":
+       → Say: "System mein thodi der ke liye check nahi kar pa rahi hoon.
+         Aap {HELPLINE} pe call kar ke direct status check kar sakte hain, ya
+         thodi der baad wapas try karein."
+
+  ⚠️ SECURITY: Full CNIC / poora naam KABHI out loud mat kaho. Sirf first name +
+   last-4 verify. Failure ke baare mein hint mat do.
+
+═══════════════════════════════════════════════════════════════════════════════
 
 3. AFTER each answer: "کوئی اور سوال؟" Wait for response.
 
@@ -264,7 +307,9 @@ HARD RULES:
 - OTP / PIN / password kabhi mat maango.
 - Account balance, transaction history phone pe NEVER share.
 - Reference numbers / TKT numbers tum nahi banati — woh Nadia banati hai complaints ke liye.
-- Agar caller frustrated lage ya complaint karna chahe — politely refer karo Nadia / {HELPLINE}.
+- LEKIN existing reference / CNIC lookup kar sakti ho — lookup_customer tool use karo.
+- Agar caller nayi complaint file karna chahe → politely refer karo Nadia / {HELPLINE}.
+- Agar caller sirf status check karna chahe → lookup_customer + last-4-verify flow use karo.
 """
 
 
@@ -279,6 +324,77 @@ class SaraAgent(Agent):
             "سپورٹ سے۔ آپ کا کیا سوال ہے؟",
             allow_interruptions=True,
         )
+
+    @function_tool
+    async def lookup_customer(
+        self,
+        cnic: Annotated[str, "Caller's CNIC in 42101-XXXXXXX-X form (13 digits, dashes optional)"] = "",
+        ticket_number: Annotated[str, "Existing ticket reference like TKT-00042"] = "",
+    ) -> str:
+        """Look up the caller's identity + open ticket history in the CRM.
+
+        Call this SILENTLY as soon as the caller mentions an existing ticket,
+        prior call, WhatsApp complaint, or gives you a CNIC / ticket number.
+        Response is MASKED — you MUST verify identity by asking for the LAST 4
+        DIGITS of their CNIC BEFORE revealing any ticket details back to them.
+        If the caller cannot confirm the last 4 digits, apologise politely and
+        do NOT disclose anything from the lookup.
+        """
+        if not CRM_API_URL or not CRM_TENANT_ID:
+            return "LOOKUP UNAVAILABLE: CRM not configured. Proceed as new caller."
+        if not cnic and not ticket_number:
+            return "LOOKUP SKIPPED: need CNIC or ticket number. Ask the caller for one."
+
+        url = (f"{CRM_API_URL.rstrip('/')}/api/v1/voice-bot/livekit/lookup"
+               f"?tenantId={CRM_TENANT_ID}")
+        if cnic:
+            d = "".join(ch for ch in cnic if ch.isdigit())
+            if len(d) == 13:
+                url += f"&cnic={d[:5]}-{d[5:12]}-{d[12]}"
+        if ticket_number:
+            url += f"&ticket={ticket_number.strip()}"
+
+        headers = {}
+        if CRM_INGEST_SECRET:
+            headers["Authorization"] = f"Bearer {CRM_INGEST_SECRET}"
+
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers,
+                                 timeout=aiohttp.ClientTimeout(total=2)) as r:
+                    data = await r.json()
+        except Exception as e:
+            logger.error(f"lookup_customer failed: {e}")
+            return "LOOKUP FAILED: continue as if new caller. Do not mention the failure to the caller."
+
+        if not data.get("found"):
+            return "NO MATCH: this caller has no prior record. Proceed naturally — do NOT mention that the lookup returned nothing."
+
+        summary = [
+            f"MATCH FOUND (do NOT read out yet — verify identity first).",
+            f"Contact display name: {data.get('displayName')}.",
+            f"CNIC masked: {data.get('cnicMasked')}.",
+            f"Total tickets: {data.get('totalTicketCount')}. Open: {data.get('openTicketCount')}.",
+        ]
+        if data.get("hasCriticalOpen"):
+            summary.append("HAS URGENT OPEN TICKET — be extra empathetic.")
+        latest = data.get("latestTicket")
+        if latest:
+            summary.append(
+                f"Latest ticket: {latest.get('number')}, subject '{latest.get('subject')}', "
+                f"status {latest.get('status')}, priority {latest.get('priority')}, "
+                f"created {latest.get('daysAgo')} days ago"
+            )
+            if latest.get("assigneeFirstName"):
+                summary.append(f"assigned to {latest.get('assigneeFirstName')}")
+            if latest.get("slaHoursLeft") is not None:
+                summary.append(f"SLA {latest.get('slaHoursLeft')} hours remaining")
+        summary.append(
+            "NEXT STEP: ask the caller to confirm the LAST 4 DIGITS of their CNIC. "
+            "If they match, proceed to share the ticket details. "
+            "If not, do NOT disclose any of the above."
+        )
+        return " ".join(summary)
 
 
 ANALYSIS_PROMPT = """You are a call analytics engine for HBL Microfinance Bank FAQ/support calls.
