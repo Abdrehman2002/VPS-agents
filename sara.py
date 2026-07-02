@@ -466,8 +466,10 @@ class SaraAgent(Agent):
         if not data.get("found"):
             return "NO MATCH: this caller has no prior record. Proceed naturally — do NOT mention that the lookup returned nothing."
 
+        matched_first = data.get("matchedFirstName") or ""
         summary = [
-            f"MATCH FOUND (do NOT read out yet — verify identity first).",
+            f"MATCH FOUND (do NOT read ticket details out yet — first do the identity readback).",
+            f"Matched first name: {matched_first!r}.",
             f"Contact display name: {data.get('displayName')}.",
             f"CNIC masked: {data.get('cnicMasked')}.",
             f"Total tickets: {data.get('totalTicketCount')}. Open: {data.get('openTicketCount')}.",
@@ -486,9 +488,12 @@ class SaraAgent(Agent):
             if latest.get("slaHoursLeft") is not None:
                 summary.append(f"SLA {latest.get('slaHoursLeft')} hours remaining")
         summary.append(
-            "NEXT STEP: ask the caller to confirm the LAST 4 DIGITS of their CNIC. "
-            "If they match, proceed to share the ticket details. "
-            "If not, do NOT disclose any of the above."
+            f"MANDATORY NEXT STEP — first-name readback verification (guards against "
+            f"last-4 CNIC collisions). Ask: 'Aap ka pehla naam {matched_first} hai — "
+            f"sahi hai?' Wait for 'ji/haan/sahi'. If confirmed → NOW share ticket "
+            f"status/subject/assignee naturally. If NO or hesitation → treat as NO "
+            f"MATCH. Do NOT reveal any ticket details. Say 'Maazrat, aap ki record "
+            f"verify nahi kar payi' and route caller to Nadia or helpline."
         )
         return " ".join(summary)
 

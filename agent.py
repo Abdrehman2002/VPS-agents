@@ -173,6 +173,15 @@ The moment ANY of the above appears, use the EASY 2-question identity flow:
   STEP 3: NOW call lookup_customer with BOTH values:
      lookup_customer(caller_name="Ahmed Raza", cnic_last4="0244")
 
+  STEP 4 (MANDATORY after MATCH): FIRST-NAME READBACK.
+     Multiple callers can share the same last-4 CNIC. Before disclosing ANY
+     ticket details, read the matched first name back to the caller:
+       "Aap ka pehla naam Saad hai — sahi hai?"
+     • If caller confirms → NOW share the ticket status/subject/assignee.
+     • If caller hesitates or says NO → treat as NO MATCH. Do NOT reveal any
+       ticket details. Say: "Maazrat, aap ki record verify nahi kar payi. Aap
+       ki nayi complaint register karti hoon." Move to NEW COMPLAINT flow.
+
   ⚠️ NEVER ask for the full 13-digit CNIC by default. Long digit runs are
      unreliable over phone STT. Name + last-4 is the standard flow.
 
@@ -532,9 +541,13 @@ class NadiaAgent(Agent):
         if not data.get("found"):
             return "NO MATCH: this caller has no prior record. Proceed with fresh complaint registration flow."
 
-        # Build a TTS-friendly summary. Bot MUST verify last-4-CNIC before saying any of this out loud.
+        # Build a TTS-friendly summary. Bot MUST do a first-name readback verify
+        # (verificationRequired='firstNameReadback') before saying ticket details.
+        matched_first = data.get("matchedFirstName") or ""
+        verify_mode = data.get("verificationRequired", "firstNameReadback")
         summary = [
-            f"MATCH FOUND (do NOT read out yet — verify identity first).",
+            f"MATCH FOUND (do NOT read ticket details out yet — first do the identity readback).",
+            f"Matched first name: {matched_first!r}.",
             f"Contact display name: {data.get('displayName')}.",
             f"CNIC masked: {data.get('cnicMasked')}.",
             f"Total tickets: {data.get('totalTicketCount')}. Open: {data.get('openTicketCount')}.",
@@ -553,10 +566,14 @@ class NadiaAgent(Agent):
             if latest.get("slaHoursLeft") is not None:
                 summary.append(f"SLA {latest.get('slaHoursLeft')} hours remaining")
         summary.append(
-            "NEXT STEP: ask the caller to confirm the LAST 4 DIGITS of their CNIC. "
-            "If they match the masked value's last digit + a plausible pattern, proceed. "
-            "If not, do NOT disclose any of the above. Say you could not find the record "
-            "and offer to register a new complaint."
+            f"MANDATORY NEXT STEP — first-name readback verification (guards against "
+            f"last-4 CNIC collisions where two contacts share the same last 4). Ask: "
+            f"'Aap ka pehla naam {matched_first} hai — sahi hai?' Wait for the caller "
+            f"to say 'ji/haan/sahi'. If they confirm → NOW share the ticket "
+            f"status/subject/assignee naturally. If they say NO or hesitate → treat "
+            f"as NO MATCH: DO NOT disclose any ticket details, say 'Maazrat, aap ki "
+            f"record verify nahi kar payi. Aap ki nayi complaint register karti hoon' "
+            f"and proceed with NEW COMPLAINT flow."
         )
         return " ".join(summary)
 

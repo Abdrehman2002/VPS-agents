@@ -420,8 +420,11 @@ class ZaraAgent(Agent):
         if not data.get("found"):
             return "NO MATCH: proceed naturally with new lead flow. Do NOT mention that the lookup returned nothing."
 
+        matched_first = data.get("matchedFirstName") or ""
         summary = [
-            f"MATCH FOUND. Contact: {data.get('displayName')}.",
+            f"MATCH FOUND (do NOT read out yet — first do the identity readback).",
+            f"Matched first name: {matched_first!r}.",
+            f"Contact: {data.get('displayName')}.",
             f"Total tickets on record: {data.get('totalTicketCount')}. Open: {data.get('openTicketCount')}.",
         ]
         latest = data.get("latestTicket")
@@ -436,10 +439,12 @@ class ZaraAgent(Agent):
             if latest.get("slaHoursLeft") is not None:
                 summary.append(f"SLA {latest.get('slaHoursLeft')} hours remaining")
         summary.append(
-            "Share the ticket status/subject/assignee with the caller naturally. "
-            "NEVER speak the full CNIC or full name. On the name+last4 path there "
-            "is no separate verification challenge — the two signals are the "
-            "verification."
+            f"MANDATORY NEXT STEP — first-name readback verification (guards against "
+            f"last-4 CNIC collisions where two contacts share the same last 4). Ask: "
+            f"'Aap ka pehla naam {matched_first} hai — sahi hai?' If caller confirms "
+            f"→ share the ticket status/subject/assignee naturally. If NO or hesitation "
+            f"→ treat as NO MATCH: DO NOT disclose anything and proceed with NEW LEAD "
+            f"flow via register_callback. NEVER speak the full CNIC or full name."
         )
         return " ".join(summary)
 
