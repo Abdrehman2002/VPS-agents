@@ -73,6 +73,60 @@ HELPLINE          = os.getenv("HELPLINE", "111-42-5000")
 def build_system_prompt() -> str:
     return f"""Tum Zara ho — HBL Microfinance Bank ki Sales aur Qualification specialist. Tumhara kaam potential customers ki needs samajhna, sahi product suggest karna, BANT framework se qualify karna, aur callback schedule karna hai.
 
+═══════════════════════════════════════════════════════════════════════════════
+🔴 MOST IMPORTANT RULE — READ FIRST, OBEY ALWAYS:
+
+You have a tool called `lookup_customer`. It queries the LIVE CRM database and
+returns real ticket/callback data. IT IS NOT OPTIONAL.
+
+MANDATORY: Call `lookup_customer` IMMEDIATELY whenever the caller mentions:
+  • "pehle" / "پہلے" ("before")
+  • "call ki thi" / "کال کی تھی" / "already"
+  • "meri callback" / "کال بیک" / "application"
+  • "status" / "کیا حال ہے" / "update chahiye"
+  • "reference number" / "ریفرنس نمبر" / TKT-XXXXX
+  • "CNIC" / "شناختی کارڈ" / any 13-digit number
+  • "WhatsApp par baat ki thi" / any prior interaction
+
+Standard 3-step identity flow (STT-safe):
+
+  STEP 1: Ask NAME first.
+     "Zaroor. Sab se pehle, aap ka poora naam kya hai?"
+     Repeat back to confirm: "[Name], sahi hai?"
+
+  STEP 2: Ask ONLY the LAST 4 DIGITS of CNIC:
+     "Aap ke CNIC ke sirf aakhri 4 digits batayein?"
+
+     ⚠️ MANDATORY DIGIT READBACK — after they answer, read the 4 digits back
+     one-by-one and wait for confirmation:
+     "Chalein confirm karti hoon — Zero, Two, Four, Four — kya yeh sahi hai?"
+
+  STEP 2b: TELL THE CALLER YOU ARE CHECKING (natural, human phrasing):
+     Pick ONE and rotate randomly:
+       "Aik minute dein, aap ki details pull karti hoon."
+       "Bas ek lamha, aap ka record dhoondh rahi hoon."
+       "Zara ruk jayein, main dekhti hoon."
+
+     🚫 FORBIDDEN — NEVER say these implementation-leak phrases:
+       ❌ "tool call kar rahi hoon"       ❌ "database check karti hoon"
+       ❌ "system se dekhti hoon"          ❌ "API se dhoondh rahi hoon"
+       ❌ "query kar rahi hoon"            ❌ "lookup kar rahi hoon"
+     Talk like a HUMAN bank rep, not a chatbot describing itself.
+
+  STEP 3: Call the tool with BOTH values:
+     lookup_customer(caller_name="Ahmed Raza", cnic_last4="0244")
+
+  STEP 4: Handle the tool response:
+    A) MATCH FOUND → share status/subject/assignee naturally. No extra
+       verification needed on name+last4 path.
+    B) AMBIGUOUS → ask for full CNIC in 3 chunks (5, then 7, then 1) with
+       readback each time. Call lookup_customer again with cnic="...".
+    C) NO MATCH → DO NOT leak the miss. Naturally proceed to NEW LEAD flow
+       via register_callback. NEVER say "record nahi mili".
+    D) LOOKUP FAILED / UNAVAILABLE → route to helpline politely.
+
+═══════════════════════════════════════════════════════════════════════════════
+
 You are speaking OUT LOUD on a phone call through an Urdu text-to-speech voice.
 CRITICAL LANGUAGE RULE: Reply ONLY in natural, conversational Urdu written in
 proper URDU SCRIPT (اردو رسم الخط). NEVER write Urdu words in Roman/Latin letters.
@@ -239,6 +293,13 @@ CONVERSATION FLOW:
 
 ═══════════════════════════════════════════════════════════════════════════════
 HARD RULES:
+- 🚫 NEVER speak these English tech words during the call — they break the human
+  illusion and confuse Urdu-speaking callers:
+     "tool", "function", "API", "database", "system", "query", "lookup",
+     "record kholti hoon", "endpoint", "backend".
+  Use natural Urdu banking phrases instead:
+     "aap ki details dekhti hoon" · "aap ka record dhoondh rahi hoon"
+     "aap ki information pull karti hoon" · "aap ke liye check karti hoon"
 - KOI PRESSURE NAHI — sales NHI hard sell.
 - Authority maloom nahi — "aap" use karo.
 - Tum aurat ho (Zara) — feminine verbs.
@@ -261,6 +322,126 @@ class ZaraAgent(Agent):
             "کیا آپ کسی لون یا اکاؤنٹ میں دلچسپی رکھتے ہیں؟",
             allow_interruptions=True,
         )
+
+    @function_tool
+    async def lookup_customer(
+        self,
+        caller_name: Annotated[str, "Caller's full name as spoken (e.g. 'Ahmed Raza'). Preferred with cnic_last4."] = "",
+        cnic_last4: Annotated[str, "Last 4 digits of the caller's CNIC (e.g. '0244'). Preferred — STT handles 4 digits reliably."] = "",
+        cnic: Annotated[str, "OPTIONAL: full CNIC 42101-XXXXXXX-X. Only if caller reads all 13 digits AND STT captured them."] = "",
+        ticket_number: Annotated[str, "OPTIONAL: existing ticket / callback reference like TKT-00042 if caller provides one."] = "",
+    ) -> str:
+        """Look up caller identity + prior lead/callback history in the CRM.
+
+        Call this SILENTLY when the caller mentions ANY of:
+          - "pehle bhi call ki thi" / "meri callback pending hai"
+          - "reference number hai X" / "TKT-XXXXX"
+          - "meri application ka kya hua"
+          - status query on a previously-registered lead
+
+        PREFERRED shape (STT-safe, use by default):
+            lookup_customer(caller_name="Ahmed Raza", cnic_last4="0244")
+
+        Ask for FULL NAME first, then just the LAST 4 CNIC digits. Do NOT ask
+        for the full 13-digit CNIC by default.
+
+        Fallbacks (only if caller volunteers them):
+            lookup_customer(cnic="42101-1234567-8")
+            lookup_customer(ticket_number="TKT-01059")
+
+        Response semantics:
+          MATCH — verificationRequired='none' on name+last4 path. Share the
+            existing ticket's status/subject/assignee naturally.
+          AMBIGUOUS — multiple contacts match; ask for full CNIC in chunks.
+          NO MATCH — silently proceed with NEW LEAD flow via register_callback.
+            NEVER say "record nahi mili" or "no info" to the caller.
+          LOOKUP FAILED / UNAVAILABLE — route to helpline politely.
+
+        NEVER speak full CNIC or full name out loud. NEVER say "tool", "system",
+        "database", "API", "query", "lookup" — talk like a HUMAN bank rep.
+        """
+        logger.warning(f"[TOOL FIRED] lookup_customer(name={caller_name!r}, last4={cnic_last4!r}, cnic={cnic!r}, ticket={ticket_number!r})")
+        if not CRM_API_URL or not CRM_TENANT_ID:
+            return "LOOKUP UNAVAILABLE: CRM not configured. Route caller to helpline."
+
+        name_trim = (caller_name or "").strip()
+        last4_digits = "".join(ch for ch in (cnic_last4 or "") if ch.isdigit())[-4:]
+        cnic_digits = "".join(ch for ch in (cnic or "") if ch.isdigit())
+
+        have_name_last4 = bool(name_trim) and len(last4_digits) == 4
+        have_full_cnic  = len(cnic_digits) == 13
+        have_ticket     = bool((ticket_number or "").strip())
+
+        if not (have_name_last4 or have_full_cnic or have_ticket):
+            if cnic and len(cnic_digits) != 13:
+                logger.warning(f"[TOOL] CNIC parse failed: {cnic!r} → {cnic_digits!r}")
+                return (
+                    "STT HICCUP — CNIC came through unclear. Do NOT tell the caller "
+                    "their input is invalid. Ask for identity the EASY way: FIRST "
+                    "their full name, THEN just the LAST 4 DIGITS of their CNIC. "
+                    "Then call lookup_customer(caller_name=..., cnic_last4=...)."
+                )
+            return (
+                "LOOKUP NEEDS INPUT — ask the caller for their FULL NAME first, "
+                "THEN the LAST 4 DIGITS of their CNIC. Call lookup_customer with "
+                "caller_name and cnic_last4."
+            )
+
+        url = (f"{CRM_API_URL.rstrip('/')}/api/v1/voice-bot/livekit/lookup"
+               f"?tenantId={CRM_TENANT_ID}")
+        if have_full_cnic:
+            url += f"&cnic={cnic_digits[:5]}-{cnic_digits[5:12]}-{cnic_digits[12]}"
+        if have_ticket:
+            url += f"&ticket={ticket_number.strip()}"
+        if have_name_last4:
+            from urllib.parse import quote_plus
+            url += f"&name={quote_plus(name_trim)}&last4={last4_digits}"
+
+        headers = {}
+        if CRM_INGEST_SECRET:
+            headers["Authorization"] = f"Bearer {CRM_INGEST_SECRET}"
+
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers,
+                                 timeout=aiohttp.ClientTimeout(total=2)) as r:
+                    data = await r.json()
+        except Exception as e:
+            logger.error(f"lookup_customer failed: {e}")
+            return "LOOKUP FAILED: continue as new caller. Do not mention the failure."
+
+        if data.get("ambiguous"):
+            return (
+                "AMBIGUOUS — multiple contacts share these last 4 digits. Ask for "
+                "the FULL 13-digit CNIC in 3 chunks (5, then 7, then 1) with "
+                "readback each time. Then call lookup_customer(cnic=...)."
+            )
+
+        if not data.get("found"):
+            return "NO MATCH: proceed naturally with new lead flow. Do NOT mention that the lookup returned nothing."
+
+        summary = [
+            f"MATCH FOUND. Contact: {data.get('displayName')}.",
+            f"Total tickets on record: {data.get('totalTicketCount')}. Open: {data.get('openTicketCount')}.",
+        ]
+        latest = data.get("latestTicket")
+        if latest:
+            summary.append(
+                f"Latest ticket: {latest.get('number')}, subject '{latest.get('subject')}', "
+                f"status {latest.get('status')}, priority {latest.get('priority')}, "
+                f"created {latest.get('daysAgo')} days ago"
+            )
+            if latest.get("assigneeFirstName"):
+                summary.append(f"assigned to {latest.get('assigneeFirstName')}")
+            if latest.get("slaHoursLeft") is not None:
+                summary.append(f"SLA {latest.get('slaHoursLeft')} hours remaining")
+        summary.append(
+            "Share the ticket status/subject/assignee with the caller naturally. "
+            "NEVER speak the full CNIC or full name. On the name+last4 path there "
+            "is no separate verification challenge — the two signals are the "
+            "verification."
+        )
+        return " ".join(summary)
 
     @function_tool
     async def register_callback(
